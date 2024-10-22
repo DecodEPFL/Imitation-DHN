@@ -8,6 +8,7 @@ from scipy.io import loadmat
 from src.model_ctrl import RenG, TrajectoryClassifier, REN
 from src.model_sys_DHN import DHN_sys
 from src.utils import set_params
+from src.SSM import DeepLRU
 
 # Set the random seed for reproducibility
 torch.manual_seed(1)
@@ -17,7 +18,8 @@ mass, cop, cp, gamma, Ts, t_end, x0, learning_rate, epochs, n_xi, l, n_traj, std
 
 # Define the system and controller models
 sys = DHN_sys(mass, cop, cp, gamma, Ts)
-ctl = REN(sys.n, sys.m, n_xi, l)
+#ctl = REN(sys.n, sys.m, n_xi, l)
+ctl=DeepLRU(3, sys.n, sys.m, 10, 10 )
 #ctl = PsiU(sys.n, sys.m, n_xi, l)
 # Initialize the controller
 #ctl = RNNController(input_size=sys.n + sys.m, hidden_size=64, output_size=sys.m)
@@ -66,6 +68,32 @@ x_u_test = x_u_dataset[train_size:]
 labels_train = (u_train > 0.1).float()
 labels_test = (u_test > 0.1).float()
 
+# Get whole noise sequence (for par scan)
+
+w = torch.zeros((train_size, t_end))
+w_val = torch.zeros((n_traj-train_size, t_end))
+for kk in range(train_size):
+    x_traj = x_train[kk]  # State trajectory: (t_end, sys.n)
+    u_traj = u_train[kk]  # Input trajectory: (t_end, sys.m)
+    if kk < n_traj-train_size:
+        x_traj_val = x_test[kk]  # State trajectory: (t_end, sys.n)
+        u_traj_val = u_test[kk]  # Input trajectory: (t_end, sys.m)
+    for t in range(t_end):
+        x = x_traj[t]  # State at time t
+        u = u_traj[t]  # Control input at time t
+        x_prev = x_traj[t - 1] if t > 0 else 0
+        u_prev = u_traj[t - 1] if t > 0 else 0
+        w[kk, t] = x - sys.noiseless_forward(t - 1, x_prev, u_prev)
+        x_val = x_traj_val[t]  # State at time t
+        u_val = u_traj_val[t]  # Control input at time t
+        x_prev_val = x_traj_val[t - 1] if t > 0 else 0
+        u_prev_val = u_traj_val[t - 1] if t > 0 else 0
+        if kk < n_traj - train_size:
+            w_val[kk, t] = x_val - sys.noiseless_forward(t - 1, x_prev_val, u_prev_val)
+
+
+w=w.unsqueeze(2)
+w_val=w_val.unsqueeze(2)
 
 # Training the controller using the NeurSLS algorithm
 print("------------ Begin training ------------")
@@ -82,34 +110,17 @@ for epoch in range(epochs):
     u_pred_val_log = torch.zeros_like(u_test)  # Log for predicted inputs
     w_val_log = torch.zeros_like(u_test)  # Log for disturbances
 
-    # Loop over all training trajectories
-    for kk in range(train_size):
-        x_traj = x_train[kk]  # State trajectory: (t_end, sys.n)
-        u_traj = u_train[kk]  # Input trajectory: (t_end, sys.m)
-        #xi = torch.zeros(ctl.dim_internal)
-        #xi = torch.zeros(ctl.n_xi)  # Reset REN internal state
 
-        number_non_zero_elements = 0
-        for t in range(t_end):
-            x = x_traj[t]  # State at time t
-            u = u_traj[t]  # Control input at time t
-            x_prev = x_traj[t-1] if t > 0 else 0
-            u_prev = u_traj[t-1] if t > 0 else 0
-            w = x - sys.noiseless_forward(t-1, x_prev, u_prev)
-            u_pred= ctl(w)  # Predict control input
+    u_pred= ctl(w)  # Predict control input
 
-            # Log the predictions and disturbances
-            u_pred_train_log[kk, t] = u_pred
-            w_train_log[kk, t] = w  # Log the disturbances
 
-            if not (u < 0.1 or (u_prev < 0.1 and t > 0)):
-                # Compute the loss as the MSE between predicted and actual input
-                number_non_zero_elements += 1
-                MSE_loss += MSE_loss_fn(u_pred, u)
-        MSE_loss = MSE_loss/number_non_zero_elements # Average loss over time steps
+    # Create a mask for non-zero elements
+    non_zero_mask = u_train > 0.1
+    u_trajn = u_train[non_zero_mask]
+    u_predn = u_pred[non_zero_mask]
 
-    MSE_loss = MSE_loss / train_size
-    MSE_loss_list[epoch] = MSE_loss.item()
+    MSE_loss = MSE_loss_fn(u_trajn, u_predn) # Average loss over time steps
+    MSE_loss_list[epoch] = MSE_loss
 
 
     #classifier training
@@ -117,7 +128,7 @@ for epoch in range(epochs):
     delta_pred = classifier(x_u_train)
 
     class_loss = class_loss_fn(delta_pred, labels_train)
-    class_loss_list[epoch] = class_loss.item() / t_end / train_size  # Average loss over time steps
+    class_loss_list[epoch] = class_loss  # Average loss over time steps
 
     print(f"Epoch: {epoch} --- Loss: {MSE_loss_list[epoch]:.4f} --- Classification loss: {class_loss_list[epoch]:.4f}")
 
@@ -126,46 +137,31 @@ for epoch in range(epochs):
     MSE_loss.backward()
     class_loss.backward()
     optimizer.step()
-    ctl.set_param()
+#    ctl.set_param()
     #ctl.set_model_param()
 
     # Validation step
     with torch.no_grad():
-        val_MSE_loss = 0
-        for kk in range(n_traj-train_size):
-            x_traj_val = x_test[kk]  # State trajectory: (t_end, sys.n)
-            u_traj_val = u_test[kk]  # Input trajectory: (t_end, sys.m)
-            #xi_val = torch.zeros(ctl.n)  # Reset REN internal state for validation
-            #xi_val = torch.zeros(ctl.n_xi)
+        u_pred_val = ctl(w_val)  # Predict control input
+        # Create a mask for non-zero elements
+        non_zero_mask = u_test > 0.1
+        u_valn = u_test[non_zero_mask]
+        u_pred_valn = u_pred_val[non_zero_mask]
+        val_MSE_loss = MSE_loss_fn(u_valn, u_pred_valn) # Average loss over time steps
 
-            number_non_zero_elements = 0
-            for t in range(t_end):
-                x_val = x_traj_val[t]  # State at time t
-                u_val = u_traj_val[t]  # Control input at time t
-                x_prev_val = x_traj_val[t - 1] if t > 0 else 0
-                u_prev_val = u_traj_val[t - 1] if t > 0 else 0
-                w_val = x_val - sys.noiseless_forward(t - 1, x_prev_val, u_prev_val)
-                u_pred_val = ctl(w_val)  # Predict control input
 
-                u_pred_val_log[kk, t] = u_pred_val
-                w_val_log[kk, t] = w_val  # Log the disturbances
-                if not (u_val < 0.1 or (u_prev_val < 0.1 and t > 0)):
-                    number_non_zero_elements += 1
-                    # Compute the validation loss as MSE between predicted and actual input
-                    val_MSE_loss += MSE_loss_fn(u_pred_val, u_val)
-            val_MSE_loss = val_MSE_loss / number_non_zero_elements
-        val_MSE_loss = val_MSE_loss / (n_traj - train_size)
+
         # Pass the state and input trajectories for classification
         delta_pred_val = classifier(x_u_test)
-        val_class_loss = class_loss_fn(delta_pred_val, labels_test) / t_end / (n_traj-train_size)
-        print(f"Validation MSE Loss: {val_MSE_loss.item() / t_end:.4f}")
+        val_class_loss = class_loss_fn(delta_pred_val, labels_test)
+        print(f"Validation MSE Loss: {val_MSE_loss / t_end:.4f}")
         print(f"Validation classification Loss: {val_class_loss.item() / t_end:.4f}")
-    if epoch % 100 == 0:
+    if epoch ==epochs-1:
         # Select one trajectory (e.g., the first one) for plotting
         trajectory_idx = 5  # Change this to plot a different trajectory
 
         # Extract the logs for the selected trajectory
-        u_pred_log = u_pred_train_log[trajectory_idx, :].detach().numpy()
+        u_pred_log = u_pred[trajectory_idx, :].detach().numpy()
         delta_pred_log = delta_pred[trajectory_idx, :].detach().numpy()
         u_real_log = u_train[trajectory_idx, :].detach().numpy()
 
@@ -183,7 +179,7 @@ for epoch in range(epochs):
         plt.grid()
         plt.show()
 
-    MSE_loss_list_val[epoch] = val_MSE_loss.item() / t_end  # Average loss over time steps
+    MSE_loss_list_val[epoch] = val_MSE_loss   # Average loss over time steps
 # Save the trained models to files
 torch.save(ctl.state_dict(), "trained_models/OFFLINE_REN.pt")
 torch.save(optimizer.state_dict(), "trained_models/OFFLINE_optimizer.pt")
@@ -212,46 +208,6 @@ plt.show()
 
 # # # # # # # # Test # # # # # # # #
 print("------------ Begin testing ------------")
-
-# Initialize arrays to store test loss and logs
-test_MSE_loss = 0
-u_pred_test_log = torch.zeros_like(u_train)  # Log for predicted inputs
-w_test_log = torch.zeros_like(u_train)  # Log for disturbances
-
-
-# Loop over all test trajectories
-for kk in range(n_traj-train_size):
-    x_traj = x_test[kk]  # State trajectory: (t_end, sys.n)
-    u_traj = u_test[kk]  # Input trajectory: (t_end, sys.m)
-
-    #xi = torch.zeros(ctl.n_xi)
-
-    number_non_zero_elements = 0
-
-    for t in range(t_end):
-        x = x_traj[t]  # State at time t
-        u = u_traj[t]  # Control input at time t
-        x_prev = x_traj[t - 1] if t > 0 else 0
-        u_prev = u_traj[t - 1] if t > 0 else 0
-        w = x - sys.noiseless_forward(t - 1, x_prev, u_prev)
-        u_pred = ctl(w)  # Predict control input
-
-        # Log the predictions and disturbances
-        u_pred_test_log[kk, t] = u_pred
-        w_test_log[kk, t] = w  # Log the disturbances
-
-        if not (u < 0.1 or (u_prev < 0.1 and t > 0)):
-            # Compute the test loss as MSE between predicted and actual input
-            number_non_zero_elements += 1
-            test_MSE_loss += MSE_loss_fn(u_pred, u)
-    test_MSE_loss = test_MSE_loss / number_non_zero_elements
-test_MSE_loss = test_MSE_loss / (n_traj-train_size)
-delta_pred_test = classifier(x_u_test)
-
-test_class_loss = class_loss_fn(delta_pred_test, labels_test)/ t_end / (n_traj-train_size)
-
-print(f"Test Loss: {test_MSE_loss:.4f}")
-print(f"Classification Loss: {test_class_loss :.4f}")
 
 
 # Plot the states and disturbances
@@ -299,7 +255,7 @@ plt.figure(figsize=(10, 5))
 for kk in range(n_traj - train_size):  # Plot up to 3 test trajectories
 
     # Extract predicted probabilities and convert to binary labels (0 or 1)
-    predicted_labels = (delta_pred_test[kk]).float().detach().numpy()
+    predicted_labels = (delta_pred_val[kk]).float().detach().numpy()
     actual_labels = labels_test[kk].detach().numpy()
 
     plt.plot(actual_labels, label=f'Test Actual Labels_{kk}', linestyle='--')
@@ -313,8 +269,8 @@ for kk in range(n_traj - train_size):  # Plot up to 3 test trajectories
     plt.show()
 
     # Extract the logs for the selected trajectory
-    u_pred_log = u_pred_test_log[kk, :].detach().numpy()
-    delta_pred_log = delta_pred_test[kk, :].detach().numpy()
+    u_pred_log = u_pred_val[kk, :].detach().numpy()
+    delta_pred_log = delta_pred_val[kk, :].detach().numpy()
     u_real_log = u_test[kk, :].detach().numpy()
 
     # Calculate the product of predicted labels and predicted inputs

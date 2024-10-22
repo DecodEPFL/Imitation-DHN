@@ -11,7 +11,7 @@ def set_params():
     x0 = 30
     # # # # # # # # Hyperparameters # # # # # # # #
     learning_rate = 1e-3
-    epochs = 500
+    epochs = 5000
     n_xi = 10  # \xi dimension -- number of states of REN
     l = 10  # dimension of the square matrix D11 -- number of _non-linear layers_ of the REN
     n_traj = 20  # number of trajectories collected at each step of the learning

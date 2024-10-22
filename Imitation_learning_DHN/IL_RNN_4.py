@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from scipy.io import loadmat
 
 # Import modules containing classes and functions needed for the simulation
-from src.model_ctrl import Controller, RenG, BinaryClassifier, TrajectoryClassifier, PsiU, RNNModel
+from src.model_ctrl import Controller, RenG, TrajectoryClassifier, PsiU, RNNModel
 from src.model_sys_DHN import DHN_sys
 from src.utils import set_params
 
@@ -182,3 +182,5 @@ plt.plot(y_test[0, :].detach().numpy(), label='y val')
 plt.title("output 1 val single RNN")
 plt.legend()
 plt.show()
+
+i
