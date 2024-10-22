@@ -11,7 +11,7 @@ from src.utils import set_params
 from src.SSM import DeepLRU
 
 # Set the random seed for reproducibility
-torch.manual_seed(1)
+torch.manual_seed(44)
 # Set the parameters and hyperparameters for the simulation
 params = set_params()
 mass, cop, cp, gamma, Ts, t_end, x0, learning_rate, epochs, n_xi, l, n_traj, std_ini, gamma_bar = params
